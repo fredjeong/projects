@@ -1,0 +1,299 @@
+import gymnasium as gym
+from gymnasium import spaces
+import pandas as pd
+import numpy as np
+import datetime
+import glob
+from pathlib import Path    
+
+from collections import Counter
+from utils import History, Portfolio, TargetPortfolio
+
+import tempfile, os
+import warnings
+warnings.filterwarnings("error")
+
+def basic_reward_function(history : History):
+    return np.log(history["portfolio_valuation", -1] / history["portfolio_valuation", -2])
+#def basic_reward_function(history : History):
+#    return history["portfolio_valuation", -1]
+
+def dynamic_feature_last_position_taken(history):
+    return history['position', -1]
+
+def dynamic_feature_real_position(history):
+    return history['real_position', -1]
+
+class TradingEnv(gym.Env):
+    """
+    An easy trading environment for OpenAI gym. It is recommended to use it this way :
+
+    .. code-block:: python
+
+        import gymnasium as gym
+        import gym_trading_env
+        env = gym.make('TradingEnv', ...)
+
+
+    :param df: The market DataFrame. It must contain 'open', 'high', 'low', 'close'. Index must be DatetimeIndex. Your desired inputs need to contain 'feature' in their column name : this way, they will be returned as observation at each step.
+    :type df: pandas.DataFrame
+
+    :param positions: List of the positions allowed by the environment.
+    :type positions: optional - list[int or float]
+
+    :param dynamic_feature_functions: The list of the dynamic features functions. By default, two dynamic features are added :
+    
+        * the last position taken by the agent.
+        * the real position of the portfolio (that varies according to the price fluctuations)
+
+    :type dynamic_feature_functions: optional - list   
+
+    :param reward_function: Take the History object of the environment and must return a float.
+    :type reward_function: optional - function<History->float>
+
+    :param trading_fees: Transaction trading fees (buy and sell operations). eg: 0.01 corresponds to 1% fees
+    :type trading_fees: optional - float
+
+    :param portfolio_initial_value: Initial valuation of the portfolio.
+    :type portfolio_initial_value: float or int
+
+    :param initial_position: You can specify the initial position of the environment or set it to 'random'. It must contained in the list parameter 'positions'.
+    :type initial_position: optional - float or int
+
+    :param max_episode_duration: If a integer value is used, each episode will be truncated after reaching the desired max duration in steps (by returning `truncated` as `True`). When using a max duration, each episode will start at a random starting point.
+    :type max_episode_duration: optional - int or 'max'
+
+    :param verbose: If 0, no log is outputted. If 1, the env send episode result logs.
+    :type verbose: optional - int
+    
+    :param name: The name of the environment (eg. 'BTC/USDT')
+    :type name: optional - str
+    
+    """
+    metadata = {'render.modes': ['logs']}
+    def __init__(self,
+                df : pd.DataFrame,
+                positions : list = [-1, 0, 1],
+                dynamic_feature_functions = [dynamic_feature_last_position_taken, dynamic_feature_real_position],
+                reward_function = basic_reward_function,
+                trading_fees = 0.15 / 100,
+                portfolio_initial_value = 20000,
+                initial_position = 'random',
+                max_episode_duration = 2000,
+                verbose = 1,
+                name = "BTC/USDT",
+                render_mode= "logs"
+                ):
+        
+        self.max_episode_duration = max_episode_duration
+        self.name = name
+        self.verbose = verbose
+
+        self.positions = positions # -1: sell, 0: hold, 1: buy
+        self.dynamic_feature_functions = dynamic_feature_functions
+        self.reward_function = reward_function
+
+        self.trading_fees = trading_fees
+
+        
+        self.portfolio_initial_value = float(portfolio_initial_value)
+        self.initial_position = initial_position
+        self.max_episode_duration = max_episode_duration
+        self.render_mode = render_mode
+
+        self._set_df(df)
+        
+        # Initialise state
+        n_coin = 1 # bitcoin for example. In the future increase the number
+        self.state = \
+            [portfolio_initial_value] + \
+            self._price_array.tolist() + \
+            [0]*n_coin
+
+        self.action_space = spaces.Discrete(3)
+        self.observation_space = spaces.Box(
+            -np.inf,
+            np.inf,
+            shape = [self._nb_features]
+        )
+        self.log_metrics = []
+
+
+    def _set_df(self, df):
+        df = df.copy()
+        self._features_columns = [col for col in df.columns if "feature" in col]
+        self._info_columns = list(set(list(df.columns) + ["close"]) - set(self._features_columns))
+        self._nb_features = len(self._features_columns)
+        self._nb_static_features = self._nb_features
+
+        for i  in range(len(self.dynamic_feature_functions)):
+            df[f"dynamic_feature__{i}"] = 0
+            self._features_columns.append(f"dynamic_feature__{i}")
+            self._nb_features += 1
+
+        self.df = df
+        self._obs_array = np.array(self.df[self._features_columns], dtype= np.float32)
+        self._info_array = np.array(self.df[self._info_columns])
+        self._price_array = np.array(self.df["close"])
+    
+    def _get_ticker(self):
+        return self.df.iloc[self._idx]
+    
+    def _get_price(self):
+        return self._price_array[self._idx]
+    
+    def _get_obs(self):
+        for i, dynamic_feature_function in enumerate(self.dynamic_feature_functions):
+            self._obs_array[self._idx, self._nb_static_features + i] = dynamic_feature_function(self.historical_info)
+
+        _step_index = self._idx
+        return self._obs_array[_step_index]
+
+    
+    def reset(self, seed = None, options=None):
+        super().reset(seed = seed)
+        
+        self._step = 0
+        self._position = np.random.choice(self.positions) if self.initial_position == 'random' else self.initial_position
+        self._limit_orders = {}
+        
+
+        self._idx = 0
+
+        if self.max_episode_duration != 'max':
+            self._idx = np.random.randint(
+                low = self._idx, 
+                high = len(self.df) - self.max_episode_duration - self._idx
+            )
+        
+        self._portfolio  = TargetPortfolio(
+            position = self._position,
+            value = self.portfolio_initial_value,
+            price = self._get_price()
+        )
+        
+        self.historical_info = History(max_size= len(self.df))
+        self.historical_info.set(
+            idx = self._idx,
+            step = self._step,
+            date = self.df.index.values[self._idx],
+            position_index =self.positions.index(self._position),
+            position = self._position,
+            real_position = self._position,
+            data =  dict(zip(self._info_columns, self._info_array[self._idx])),
+            portfolio_valuation = self.portfolio_initial_value,
+            portfolio_distribution = self._portfolio.get_portfolio_distribution(),
+            reward = 0,
+        )
+
+        return self._get_obs(), self.historical_info[0]
+
+    def render(self):
+        pass
+
+    def _trade(self, position, price = None):
+        self._portfolio.trade_to_position(
+            position, 
+            price = self._get_price() if price is None else price, 
+            trading_fees = self.trading_fees
+        )
+        self._position = position
+        return
+
+    def _take_action(self, position):
+        if position != self._position:
+            self._trade(position)
+    
+    def _take_action_order_limit(self):
+        if len(self._limit_orders) > 0:
+            ticker = self._get_ticker()
+            for position, params in self._limit_orders.items():
+                if position != self._position and params['limit'] <= ticker["high"] and params['limit'] >= ticker["low"]:
+                    self._trade(position, price= params['limit'])
+                    if not params['persistent']: del self._limit_orders[position]
+
+    
+    def add_limit_order(self, position, limit, persistent = False):
+        self._limit_orders[position] = {
+            'limit' : limit,
+            'persistent': persistent
+        }
+    
+    def step(self, position_index = None):
+        if position_index is not None: self._take_action(self.positions[position_index])
+        self._idx += 1
+        self._step += 1
+
+        self._take_action_order_limit()
+        price = self._get_price()
+
+        portfolio_value = self._portfolio.valorisation(price)
+        portfolio_distribution = self._portfolio.get_portfolio_distribution()
+
+        done, truncated = False, False
+
+        if portfolio_value <= 0:
+            done = True
+        if self._idx >= len(self.df) - 1:
+            truncated = True
+        if isinstance(self.max_episode_duration,int) and self._step >= self.max_episode_duration - 1:
+            truncated = True
+
+        self.historical_info.add(
+            idx = self._idx,
+            step = self._step,
+            date = self.df.index.values[self._idx],
+            position_index =position_index,
+            position = self._position,
+            real_position = self._portfolio.real_position(price),
+            data =  dict(zip(self._info_columns, self._info_array[self._idx])),
+            portfolio_valuation = portfolio_value,
+            portfolio_distribution = portfolio_distribution, 
+            reward = 0
+        )
+        if not done:
+            reward = self.reward_function(self.historical_info)
+            self.historical_info["reward", -1] = reward
+
+        if done or truncated:
+            self.calculate_metrics()
+            self.log()
+        return self._get_obs(),  self.historical_info["reward", -1], done, truncated, self.historical_info[-1]
+
+    def add_metric(self, name, function):
+        self.log_metrics.append({
+            'name': name,
+            'function': function
+        })
+    
+    def calculate_metrics(self):
+        self.results_metrics = {
+            "Market Return" : f"{100*(self.historical_info['data_close', -1] / self.historical_info['data_close', 0] -1):5.2f}%",
+            "Portfolio Return" : f"{100*(self.historical_info['portfolio_valuation', -1] / self.historical_info['portfolio_valuation', 0] -1):5.2f}%",
+        }
+
+        for metric in self.log_metrics:
+            self.results_metrics[metric['name']] = metric['function'](self.historical_info)
+    
+    def get_metrics(self):
+        return self.results_metrics
+    
+    def log(self):
+        if self.verbose > 0:
+            text = ""
+            for key, value in self.results_metrics.items():
+                text += f"{key} : {value}   |   "
+            print(text)
+
+    def save_for_render(self, dir = "render_logs"):
+        assert "open" in self.df and "high" in self.df and "low" in self.df and "close" in self.df, "Your DataFrame needs to contain columns : open, high, low, close to render !"
+        columns = list(set(self.historical_info.columns) - set([f"date_{col}" for col in self._info_columns]))
+        history_df = pd.DataFrame(
+            self.historical_info[columns], columns= columns
+        )
+        history_df.set_index("date", inplace= True)
+        history_df.sort_index(inplace = True)
+        render_df = self.df.join(history_df, how = "inner")
+        
+        if not os.path.exists(dir):os.makedirs(dir)
+        render_df.to_pickle(f"{dir}/{self.name}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pkl")
