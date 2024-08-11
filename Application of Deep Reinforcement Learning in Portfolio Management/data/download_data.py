@@ -8,5 +8,6 @@ download(exchange_names = ["binance"],
          dir = "data",
          since = datetime.datetime(year = 2020, month = 3, day = 31))
 
-df = pd.read_pickle("./data/binance-BTCUSDT-1h.pkl")
+# To load the data
+# df = pd.read_pickle("./data/binance-BTCUSDT-1h.pkl")
 
