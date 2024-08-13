@@ -22,3 +22,9 @@ The environment is designed using OpenAI Gym.
 2. Proximal Policy Optimisation
 
 3. Deep Deterministic Policy Gradient
+
+4. A2C/A3C
+
+\[읽을거리\]
+
+https://greentec.github.io/reinforcement-learning-fourth/

@@ -1,313 +1,275 @@
-import gymnasium as gym
-from gymnasium import spaces
-import pandas as pd
 import numpy as np
-import datetime
-import glob
-from pathlib import Path    
+import random
+from collections import deque, namedtuple
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from tensorboardX import SummaryWriter
 
-from collections import Counter
-from utils import History, Portfolio, TargetPortfolio
+from utility import TradingGraph, ReplayMemory
+from model import DQN
 
-import tempfile, os
-import warnings
-warnings.filterwarnings("error")
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else
+    "mps" if torch.backends.mps.is_available() else
+    "cpu"
+)
 
-def basic_reward_function(history : History):
-    return np.log(history["portfolio_valuation", -1] / history["portfolio_valuation", -2])
-#def basic_reward_function(history : History):
-#    return history["portfolio_valuation", -1]
+class TradingEnv:
+    # A custom Bitcoin trading environment
+    def __init__(self, df, initial_balance=1000, lookback_window_size=50, render_range = 100):
+        # Define action space and state size and other custom parameters
+        self.df = df.dropna().reset_index()
+        self.df_total_steps = len(self.df)-1
+        self.initial_balance = initial_balance
+        self.lookback_window_size = lookback_window_size
+        self.render_range = render_range # render range in visualization
 
-def dynamic_feature_last_position_taken(history):
-    return history['position', -1]
+        self.BATCH_SIZE = 500
+        self.GAMMA = 0.99
+        self.EPS_START = 0.9
+        self.EPS_END = 0.05
+        self.EPS_DECAY = 1000
+        self.TAU = 0.005
+        self.LR = 1e-4
 
-def dynamic_feature_real_position(history):
-    return history['real_position', -1]
-
-class TradingEnv(gym.Env):
-    """
-    An easy trading environment for OpenAI gym. It is recommended to use it this way :
-
-    .. code-block:: python
-
-        import gymnasium as gym
-        import gym_trading_env
-        env = gym.make('TradingEnv', ...)
-
-
-    :param df: The market DataFrame. It must contain 'open', 'high', 'low', 'close'. Index must be DatetimeIndex. Your desired inputs need to contain 'feature' in their column name : this way, they will be returned as observation at each step.
-    :type df: pandas.DataFrame
-
-    :param positions: List of the positions allowed by the environment.
-    :type positions: optional - list[int or float]
-
-    :param dynamic_feature_functions: The list of the dynamic features functions. By default, two dynamic features are added :
     
-        * the last position taken by the agent.
-        * the real position of the portfolio (that varies according to the price fluctuations)
+        self.memory = ReplayMemory(1000)
 
-    :type dynamic_feature_functions: optional - list   
+        # Action space from 0 to 3, 0 is hold, 1 is buy, 2 is sell
+        self.action_space = np.array([0, 1, 2])
+        n_actions = len(self.action_space)
 
-    :param reward_function: Take the History object of the environment and must return a float.
-    :type reward_function: optional - function<History->float>
-
-    :param windows: Default is None. If it is set to an int: N, every step observation will return the past N observations. It is recommended for Recurrent Neural Network based Agents.
-    :type windows: optional - None or int
-
-    :param trading_fees: Transaction trading fees (buy and sell operations). eg: 0.01 corresponds to 1% fees
-    :type trading_fees: optional - float
-
-    :param borrow_interest_rate: Borrow interest rate per step (only when position < 0 or position > 1). eg: 0.01 corresponds to 1% borrow interest rate per STEP ; if your know that your borrow interest rate is 0.05% per day and that your timestep is 1 hour, you need to divide it by 24 -> 0.05/100/24.
-    :type borrow_interest_rate: optional - float
-
-    :param portfolio_initial_value: Initial valuation of the portfolio.
-    :type portfolio_initial_value: float or int
-
-    :param initial_position: You can specify the initial position of the environment or set it to 'random'. It must contained in the list parameter 'positions'.
-    :type initial_position: optional - float or int
-
-    :param max_episode_duration: If a integer value is used, each episode will be truncated after reaching the desired max duration in steps (by returning `truncated` as `True`). When using a max duration, each episode will start at a random starting point.
-    :type max_episode_duration: optional - int or 'max'
-
-    :param verbose: If 0, no log is outputted. If 1, the env send episode result logs.
-    :type verbose: optional - int
-    
-    :param name: The name of the environment (eg. 'BTC/USDT')
-    :type name: optional - str
-    
-    """
-    metadata = {'render_modes': ['logs']}
-    def __init__(self,
-                df : pd.DataFrame,
-                positions : list = [-1, 0, 1],
-                dynamic_feature_functions = [dynamic_feature_last_position_taken, dynamic_feature_real_position],
-                reward_function = basic_reward_function,
-                windows = None,
-                trading_fees = 0.15 / 100,
-                borrow_interest_rate = 0,
-                portfolio_initial_value = 20000,
-                initial_position = 'random',
-                max_episode_duration = 2000,
-                verbose = 1,
-                name = "BTC/USDT",
-                render_mode= "logs"
-                ):
+        # Orders history contains the balance, net_worth, crypto_bought, crypto_sold, crypto_held values for the last lookback_window_size steps
+        self.orders_history = deque(maxlen=self.lookback_window_size)
         
-        self.max_episode_duration = max_episode_duration
-        self.name = name
-        self.verbose = verbose
+        # Market history contains the OHCL values for the last lookback_window_size prices
+        self.market_history = deque(maxlen=self.lookback_window_size)
 
-        self.positions = positions
-        self.dynamic_feature_functions = dynamic_feature_functions
-        self.reward_function = reward_function
-        #self.windows = windows
-        self.trading_fees = trading_fees
-        self.borrow_interest_rate = borrow_interest_rate
-        self.portfolio_initial_value = float(portfolio_initial_value)
-        self.initial_position = initial_position
-        #assert self.initial_position in self.positions or self.initial_position == 'random', #"The 'initial_position' parameter must be 'random' or a position mentionned in the 'position' (default is [0, 1]) parameter."
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.max_episode_duration = max_episode_duration
-        self.render_mode = render_mode
-        self._set_df(df)
+        # State size contains Market+Orders history for the last lookback_window_size steps
+        self.state_size = (self.lookback_window_size, 10)
+
+        self.policy_net = DQN(n_actions, self.state_size).to(device)
+        self.target_net = DQN(n_actions, self.state_size).to(device)
+
+        optimizer = optim.Adam(self.policy_net.parameters(), lr=self.LR)
+
+    # Create tensorboard writer
+    def create_writer(self):
+        self.replay_count = 0
+        self.writer = SummaryWriter(comment="Crypto_trader")
+
+    # Reset the state of the environment to an initial state
+    def reset(self, env_steps_size = 0):
+        self.visualization = TradingGraph(render_range=self.render_range) # init visualization
+        self.trades = deque(maxlen=self.render_range) # limited orders memory for visualization
         
-        #self.action_space = spaces.Discrete(len(positions))
-        self.action_space = spaces.Discrete(3)
-        self.observation_space = spaces.Box(
-            -np.inf,
-            np.inf,
-            shape = [self._nb_features]
-        )
-        #if self.windows is not None:
-        #    self.observation_space = spaces.Box(
-        #        -np.inf,
-        #        np.inf,
-        #        shape = [self.windows, self._nb_features]
-        #    )
+        self.balance = self.initial_balance
+        self.net_worth = self.initial_balance
+        self.prev_net_worth = self.initial_balance
+        self.crypto_held = 0
+        self.crypto_sold = 0
+        self.crypto_bought = 0
+        if env_steps_size > 0: # used for training dataset
+            self.start_step = random.randint(self.lookback_window_size, self.df_total_steps - env_steps_size)
+            self.end_step = self.start_step + env_steps_size
+        else: # used for testing dataset
+            self.start_step = self.lookback_window_size
+            self.end_step = self.df_total_steps
+            
+        self.current_step = self.start_step
+
+        for i in reversed(range(self.lookback_window_size)):
+            current_step = self.current_step - i
+            self.orders_history.append([self.balance, self.net_worth, self.crypto_bought, self.crypto_sold, self.crypto_held])
+            self.market_history.append([self.df.loc[current_step, 'open'],
+                                        self.df.loc[current_step, 'high'],
+                                        self.df.loc[current_step, 'low'],
+                                        self.df.loc[current_step, 'close'],
+                                        self.df.loc[current_step, 'volume']
+                                        ])
+
+        state = np.concatenate((self.market_history, self.orders_history), axis=1)
+        return state
+
+    # Get the data points for the given current_step
+    def _next_observation(self):
+        self.market_history.append([self.df.loc[self.current_step, 'open'],
+                                    self.df.loc[self.current_step, 'high'],
+                                    self.df.loc[self.current_step, 'low'],
+                                    self.df.loc[self.current_step, 'close'],
+                                    self.df.loc[self.current_step, 'volume']
+                                    ])
+        obs = np.concatenate((self.market_history, self.orders_history), axis=1)
+        return obs
+
+    # Execute one time step within the environment
+    def step(self, action):
+        self.crypto_bought = 0
+        self.crypto_sold = 0
+        self.current_step += 1
+
+        # Set the current price to a random price between open and close
+        current_price = random.uniform(
+            self.df.loc[self.current_step, 'open'],
+            self.df.loc[self.current_step, 'close'])
+        date = self.df.loc[self.current_step, 'date_open'] # for visualization
+        high = self.df.loc[self.current_step, 'high'] # for visualization
+        low = self.df.loc[self.current_step, 'low'] # for visualization
         
-        self.log_metrics = []
+        if action == 0: # Hold
+            pass
 
+        elif action == 1 and self.balance > self.initial_balance/100:
+            # Buy with 100% of current balance
+            self.crypto_bought = self.balance / current_price
+            self.balance -= self.crypto_bought * current_price
+            self.crypto_held += self.crypto_bought
+            self.trades.append({'Date' : date, 'High' : high, 'Low' : low, 'Total': self.crypto_bought, 'Type': "buy"})
 
-    def _set_df(self, df):
-        df = df.copy()
-        self._features_columns = [col for col in df.columns if "feature" in col]
-        self._info_columns = list(set(list(df.columns) + ["close"]) - set(self._features_columns))
-        self._nb_features = len(self._features_columns)
-        self._nb_static_features = self._nb_features
+        elif action == 2 and self.crypto_held>0:
+            # Sell 100% of current crypto held
+            self.crypto_sold = self.crypto_held
+            self.balance += self.crypto_sold * current_price
+            self.crypto_held -= self.crypto_sold
+            self.trades.append({'Date' : date, 'High' : high, 'Low' : low, 'Total': self.crypto_sold, 'Type': "sell"})
 
-        for i  in range(len(self.dynamic_feature_functions)):
-            df[f"dynamic_feature__{i}"] = 0
-            self._features_columns.append(f"dynamic_feature__{i}")
-            self._nb_features += 1
+        self.prev_net_worth = self.net_worth
+        self.net_worth = self.balance + self.crypto_held * current_price
 
-        self.df = df
-        self._obs_array = np.array(self.df[self._features_columns], dtype= np.float32)
-        self._info_array = np.array(self.df[self._info_columns])
-        self._price_array = np.array(self.df["close"])
+        self.orders_history.append([self.balance, self.net_worth, self.crypto_bought, self.crypto_sold, self.crypto_held])
+        #Write_to_file(Date, self.orders_history[-1])
 
+        # Calculate reward
+        reward = (self.net_worth - self.prev_net_worth)
 
-    
-    def _get_ticker(self, delta = 0):
-        return self.df.iloc[self._idx + delta]
-    def _get_price(self, delta = 0):
-        return self._price_array[self._idx + delta]
-    
-    def _get_obs(self):
-        for i, dynamic_feature_function in enumerate(self.dynamic_feature_functions):
-            self._obs_array[self._idx, self._nb_static_features + i] = dynamic_feature_function(self.historical_info)
-
-        _step_index = self._idx
-        #if self.windows is None:
-        #    _step_index = self._idx
-        #else: 
-        #    _step_index = np.arange(self._idx + 1 - self.windows , self._idx + 1)
-        return self._obs_array[_step_index]
-
-    
-    def reset(self, seed = None, options=None):
-        super().reset(seed = seed)
-        
-        self._step = 0
-        self._position = np.random.choice(self.positions) if self.initial_position == 'random' else self.initial_position
-        self._limit_orders = {}
-        
-
-        self._idx = 0
-        #if self.windows is not None: self._idx = self.windows - 1
-        if self.max_episode_duration != 'max':
-            self._idx = np.random.randint(
-                low = self._idx, 
-                high = len(self.df) - self.max_episode_duration - self._idx
-            )
-        
-        self._portfolio  = TargetPortfolio(
-            position = self._position,
-            value = self.portfolio_initial_value,
-            price = self._get_price()
-        )
-        
-        self.historical_info = History(max_size= len(self.df))
-        self.historical_info.set(
-            idx = self._idx,
-            step = self._step,
-            date = self.df.index.values[self._idx],
-            position_index =self.positions.index(self._position),
-            position = self._position,
-            real_position = self._position,
-            data =  dict(zip(self._info_columns, self._info_array[self._idx])),
-            portfolio_valuation = self.portfolio_initial_value,
-            portfolio_distribution = self._portfolio.get_portfolio_distribution(),
-            reward = 0,
-        )
-
-        return self._get_obs(), self.historical_info[0]
-
-    def render(self):
-        pass
-
-    def _trade(self, position, price = None):
-        self._portfolio.trade_to_position(
-            position, 
-            price = self._get_price() if price is None else price, 
-            trading_fees = self.trading_fees
-        )
-        self._position = position
-        return
-
-    def _take_action(self, position):
-        if position != self._position:
-            self._trade(position)
-    
-    def _take_action_order_limit(self):
-        if len(self._limit_orders) > 0:
-            ticker = self._get_ticker()
-            for position, params in self._limit_orders.items():
-                if position != self._position and params['limit'] <= ticker["high"] and params['limit'] >= ticker["low"]:
-                    self._trade(position, price= params['limit'])
-                    if not params['persistent']: del self._limit_orders[position]
-
-    
-    def add_limit_order(self, position, limit, persistent = False):
-        self._limit_orders[position] = {
-            'limit' : limit,
-            'persistent': persistent
-        }
-    
-    def step(self, position_index = None):
-        if position_index is not None: self._take_action(self.positions[position_index])
-        self._idx += 1
-        self._step += 1
-
-        self._take_action_order_limit()
-        price = self._get_price()
-        self._portfolio.update_interest(borrow_interest_rate= self.borrow_interest_rate)
-        portfolio_value = self._portfolio.valorisation(price)
-        portfolio_distribution = self._portfolio.get_portfolio_distribution()
-
-        done, truncated = False, False
-
-        if portfolio_value <= 0:
+        if self.net_worth <= self.initial_balance/2:
             done = True
-        if self._idx >= len(self.df) - 1:
-            truncated = True
-        if isinstance(self.max_episode_duration,int) and self._step >= self.max_episode_duration - 1:
-            truncated = True
+        else:
+            done = False
 
-        self.historical_info.add(
-            idx = self._idx,
-            step = self._step,
-            date = self.df.index.values[self._idx],
-            position_index =position_index,
-            position = self._position,
-            real_position = self._portfolio.real_position(price),
-            data =  dict(zip(self._info_columns, self._info_array[self._idx])),
-            portfolio_valuation = portfolio_value,
-            portfolio_distribution = portfolio_distribution, 
-            reward = 0
-        )
-        if not done:
-            reward = self.reward_function(self.historical_info)
-            self.historical_info["reward", -1] = reward
-
-        if done or truncated:
-            self.calculate_metrics()
-            self.log()
-        return self._get_obs(),  self.historical_info["reward", -1], done, truncated, self.historical_info[-1]
-
-    def add_metric(self, name, function):
-        self.log_metrics.append({
-            'name': name,
-            'function': function
-        })
-    
-    def calculate_metrics(self):
-        self.results_metrics = {
-            "Market Return" : f"{100*(self.historical_info['data_close', -1] / self.historical_info['data_close', 0] -1):5.2f}%",
-            "Portfolio Return" : f"{100*(self.historical_info['portfolio_valuation', -1] / self.historical_info['portfolio_valuation', 0] -1):5.2f}%",
-        }
-
-        for metric in self.log_metrics:
-            self.results_metrics[metric['name']] = metric['function'](self.historical_info)
-    
-    def get_metrics(self):
-        return self.results_metrics
-    
-    def log(self):
-        if self.verbose > 0:
-            text = ""
-            for key, value in self.results_metrics.items():
-                text += f"{key} : {value}   |   "
-            print(text)
-
-    def save_for_render(self, dir = "render_logs"):
-        assert "open" in self.df and "high" in self.df and "low" in self.df and "close" in self.df, "Your DataFrame needs to contain columns : open, high, low, close to render !"
-        columns = list(set(self.historical_info.columns) - set([f"date_{col}" for col in self._info_columns]))
-        history_df = pd.DataFrame(
-            self.historical_info[columns], columns= columns
-        )
-        history_df.set_index("date", inplace= True)
-        history_df.sort_index(inplace = True)
-        render_df = self.df.join(history_df, how = "inner")
+        obs = self._next_observation()
         
-        if not os.path.exists(dir):os.makedirs(dir)
-        render_df.to_pickle(f"{dir}/{self.name}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pkl")
+        return obs, reward, done
+
+    # render environment
+    def render(self, visualize=False):
+        #print(f'Step: {self.current_step}, Net Worth: {self.net_worth}')
+        if visualize:
+            date = self.df.loc[self.current_step, 'date_open']
+            open = self.df.loc[self.current_step, 'open']
+            close = self.df.loc[self.current_step, 'close']
+            high = self.df.loc[self.current_step, 'high']
+            low = self.df.loc[self.current_step, 'low']
+            volume = self.df.loc[self.current_step, 'volume']
+
+            # Render the environment to the screen
+            self.visualization.render(date, open, high, low, close, volume, self.net_worth, self.trades)
+    
+    def act(self, state): # select_action에 대응
+        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        sample = random.random()
+        eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * np.exp(-1 * self.current_step / self.EPS_DECAY)
+        
+        if sample > eps_threshold:
+            with torch.no_grad():
+                return self.policy_net(state).max(1).indices.view(1,1)
+        else:
+            return torch.tensor([[np.random.choice(self.action_space)]], device=device, dtype=torch.long)
+
+    def save(self, name="dqn"):
+        torch.save(self.policy_net.state_dict(), f'./dqn/{name}_Policy.h5')
+        torch.save(self.target_net.state_dict(), f'./dqn/{name}_Target.h5')
+#
+    def load(self, name="dqn"):
+        self.policy_net.load_state_dict(torch.load(f'./dqn/{name}_Policy.h5', weights_only=True))
+        self.target_net.load_state_dict(torch.load(f'./dqn{name}_Target.h5', weights_only=True))
+        
+    def optimize_model(self):
+        if len(self.memory) < self.BATCH_SIZE:
+            return
+        Transition = namedtuple('Transition',
+                        ('state', 'action', 'next_state', 'reward'))
+        transitions = self.memory.sample(self.BATCH_SIZE)
+        # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+        # detailed explanation). This converts batch-array of Transitions
+        # to Transition of batch-arrays.
+        batch = Transition(*zip(*transitions))
+
+        # Compute a mask of non-final states and concatenate the batch elements
+        # (a final state would've been the one after which simulation ended)
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                            batch.next_state)), device=device, dtype=torch.bool)
+        non_final_next_states = torch.cat([s for s in batch.next_state
+                                                    if s is not None])
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        reward_batch = torch.cat(batch.reward)
+
+        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+        # columns of actions taken. These are the actions which would've been taken
+        # for each batch state according to policy_net
+        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
+
+        # Compute V(s_{t+1}) for all next states.
+        # Expected values of actions for non_final_next_states are computed based
+        # on the "older" target_net; selecting their best reward with max(1).values
+        # This is merged based on the mask, such that we'll have either the expected
+        # state value or 0 in case the state was final.
+        next_state_values = torch.zeros(self.BATCH_SIZE, device=device)
+        with torch.no_grad():
+            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1).values
+        # Compute the expected Q values
+        expected_state_action_values = (next_state_values * self.GAMMA) + reward_batch
+
+        # Compute Huber loss
+        criterion = nn.SmoothL1Loss()
+        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+
+        # Optimize the model
+        self.optimizer.zero_grad()
+        loss.backward()
+        # In-place gradient clipping
+        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
+        self.optimizer.step()
+        
+
+def train_agent(env, visualize=False, train_episodes=1, training_batch_size=500):
+    env.create_writer() # create TensorBoard writer
+    total_average = deque(maxlen=100) # save recent 100 episodes net worth
+    best_average = 0 # used to track best average net worth
+    memory = ReplayMemory(1000)
+    
+    for episode in range(train_episodes):
+        state = env.reset(env_steps_size = training_batch_size)
+        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        
+        for t in range(training_batch_size):
+            env.render(visualize)
+            action = env.act(state)
+            next_state, reward, done = env.step(action)
+            action_onehot = np.zeros(3)
+            action_onehot[action] = 1
+            memory.push(state, action, next_state, reward) # Store the transition in memory
+            state = next_state
+            env.optimize_model() # perform one step of the optimization on the policy network
+
+            print(f"net_worth: {env.net_worth}, step: {env.current_step}")
+            if episode == train_episodes - 1:
+                env.save()
+
+            if done:
+                break
+    
+def test_agent(env, visualize=True, test_episodes=1):
+    env.load() # load the model
+    for episode in range(test_episodes):
+        state = env.reset()
+        while True:
+            env.render(visualize)
+            action = env.act(state)
+            state, reward, done = env.step(action)
+            print(f"Episode {episode} net_worth:, {env.net_worth}")
+            if env.current_step == env.end_step:
+                break
+

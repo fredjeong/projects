@@ -1,14 +1,5 @@
-import torch
 import pandas as pd
-
-from environment import TradingEnv, train_agent
-
-# gpu 설정
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else
-    "mps" if torch.backends.mps.is_available() else
-    "cpu"
-)
+from environment import TradingEnv, Random_games
 
 lookback_window_size = 50
 data_path = "./data/binance-BTCUSDT-1h.pkl"
@@ -21,5 +12,7 @@ test_df = df[train_size:]
 lookback_window_size = 50
 
 train_env = TradingEnv(train_df, lookback_window_size=lookback_window_size)
+test_env = TradingEnv(test_df, lookback_window_size=lookback_window_size)
 
-train_agent(train_env, visualize=False, train_episodes=1, training_batch_size=500)
+Random_games(train_env, visualize=False,train_episodes = 10, training_batch_size=500)
+Random_games(test_env, visualize=True, train_episodes = 1, training_batch_size=300)

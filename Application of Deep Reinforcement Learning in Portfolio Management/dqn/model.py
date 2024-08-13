@@ -1,23 +1,24 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-import tensorflow as tf
-#from tensorflow.keras.models import Sequential
-#from tensorflow.keras.layers import Dense
-#from tensorflow.keras.optimizers import Adam
+class DQN(nn.Module):
+    def __init__(self, action_space, state_size):
+        super(DQN, self).__init__()
+        self.action_space = action_space
+        self.state_size = state_size
+        self.state_size = self.state_size[0] * self.state_size[1]
 
+        self.flatten = nn.Flatten()
+        self.layer1 = nn.Linear(500, 128)
+        self.layer2 = nn.Linear(128, 128)
+        self.layer3 = nn.Linear(128, self.action_space)
 
-def mlp(n_obs, n_action, n_hidden_layer=1, n_neuron_per_layer=32,
-        activation='relu', loss='mse'):
-    """ A multi-layer perceptron """
-    print(n_action)
-    
-    model = tf.keras.Sequential()
-    #
-    model.add(tf.keras.Input((None, 3))) # Input shape 찾기
-    #
-    model.add(tf.keras.layers.Dense(n_neuron_per_layer, input_dim=n_obs, activation=activation))
-    for _ in range(n_hidden_layer):
-        model.add(tf.keras.Dense(n_neuron_per_layer, activation=activation))
-    model.add(tf.keras.Dense(n_action, activation='linear'))
-    model.compile(loss=loss, optimizer=tf.keras.optimizers.Adam())
-    print(model.summary())
-    return model
+    # Called with either one element to determine next action, or a batch
+    # during optimization. Returns tensor([[left0exp,right0exp]...]).
+    def forward(self, x):
+        x = self.flatten(x)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        
+        return self.layer3(x)

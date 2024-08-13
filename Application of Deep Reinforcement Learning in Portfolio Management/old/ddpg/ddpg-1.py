@@ -1,6 +1,3 @@
-# 실행하려면 메인 폴더로 이동시킬 것
-# total reward -40000
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -58,7 +55,7 @@ class BitcoinTradingEnv(gym.Env):
         '''
         super().reset(seed=seed)
         self.current_step = 0
-        self.fiat_fiat = self.initial_fiat
+        self.fiat = self.initial_fiat
         self.asset = 0
         self.done = False
         return np.array([self.fiat, self.asset, self.prices[self.current_step]]), {}

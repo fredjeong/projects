@@ -9,3 +9,13 @@
 - transaction cost 반영
 - step 수정: 팔 때와 살 때 구분
 - replay buffer는 자동으로 반영되는 것 확인했음
+
+## `ddpg-2`
+- `action[0]`이 0보다 작을 때는 
+```
+else:
+    if self.asset >= 0:
+        self.asset *= (1 + action[0])
+        self.fiat += (1 + action[0]) * self.prices[self.current_step] * (1 - self.transaction_cost)
+
+```
