@@ -1,14 +1,15 @@
 import numpy as np
 import random
 from collections import deque, namedtuple
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
 #from tensorboardX import SummaryWriter
 import gymnasium as gym
 
-from utility import TradingGraph, ReplayMemory
-from model import DQN
+from utils_ddpg import TradingGraph, ReplayMemory#, OU_noise
+from model import Actor, Critic
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else
@@ -16,7 +17,7 @@ device = torch.device(
     "cpu"
 )
 
-class TradingEnv(gym.Env):
+class TradingEnv:
     # A custom Bitcoin trading environment
     def __init__(self, df, initial_balance=1000, lookback_window_size=50, render_range = 100):
         # Define action space and state size and other custom parameters
@@ -26,19 +27,18 @@ class TradingEnv(gym.Env):
         self.lookback_window_size = lookback_window_size
         self.render_range = render_range # render range in visualization
 
-        self.batch_size = 64
-        self.gamma = 0.99
-        self.eps_start = 0.9
-        self.eps_end = 0.05
-        self.eps_decay = 1000
-        self.tau = 0.1
-        self.lr = 1e-4
+        self.BATCH_SIZE = 64
+        self.GAMMA = 0.99
+        self.TAU = 0.1
+        self.LR = 1e-4
 
+        #self.OU = OU_noise(1)
+
+    
         self.memory = ReplayMemory(1000)
 
-        # Action space from 0 to 3, 0 is hold, 1 is buy, 2 is sell
-        self.action_space = np.array([0, 1, 2])
-        n_actions = len(self.action_space)
+        # Action space from -1 to 1. -1
+        self.action_space = gym.spaces.Box(low=-1, high=1, shape=(1,)) 
 
         # Orders history contains the balance, net_worth, crypto_bought, crypto_sold, crypto_held values for the last lookback_window_size steps
         self.orders_history = deque(maxlen=self.lookback_window_size)
@@ -49,11 +49,18 @@ class TradingEnv(gym.Env):
         # State size contains Market+Orders history for the last lookback_window_size steps
         self.state_size = (self.lookback_window_size, 10)
 
-        self.Target = DQN(n_actions, self.state_size).to(device)
-        self.Behaviour = DQN(n_actions, self.state_size).to(device)
+        self.Actor_target = Actor().to(device)
+        self.Actor_behaviour = copy.deepcopy(self.Actor_target).to(device)
+        self.Critic_target = Critic().to(device)
+        self.Critic_behaviour = copy.deepcopy(self.Critic_target).to(device)
 
-        self.optimizer = optim.Adam(self.Behaviour.parameters(), lr=self.lr)
+        self.actor_optimizer = optim.Adam(self.Actor_behaviour.parameters(), lr=self.LR)
+        self.critic_optimizer = optim.Adam(self.Critic_behaviour.parameters(), lr=self.LR)
 
+    # Create tensorboard writer
+#    def create_writer(self):
+#        self.replay_count = 0
+#        self.writer = SummaryWriter(comment="Crypto_trader")
 
     # Reset the state of the environment to an initial state
     def reset(self, env_steps_size = 0):
@@ -66,6 +73,7 @@ class TradingEnv(gym.Env):
         self.crypto_held = 0
         self.crypto_sold = 0
         self.crypto_bought = 0
+
         if env_steps_size > 0: # used for training dataset
             self.start_step = random.randint(self.lookback_window_size, self.df_total_steps - env_steps_size)
             self.end_step = self.start_step + env_steps_size
@@ -97,10 +105,17 @@ class TradingEnv(gym.Env):
                                     self.df.loc[self.current_step, 'volume']
                                     ])
         obs = np.concatenate((self.market_history, self.orders_history), axis=1)
+
         return obs
 
     # Execute one time step within the environment
     def step(self, action):
+        if action == int(action):
+            pass
+        else:
+            action = action.item()
+
+        #action = action.cpu() # 새로 추가한 부분
         self.crypto_bought = 0
         self.crypto_sold = 0
         self.current_step += 1
@@ -115,18 +130,16 @@ class TradingEnv(gym.Env):
         
         if action == 0: # Hold
             pass
-
-        elif action == 1 and self.balance > self.initial_balance/100:
-            # Buy with 100% of current balance
-            self.crypto_bought = self.balance / current_price
+        
+        elif action > 0 and self.balance > self.initial_balance/100: # 0이 아닌 이유: 가끔 오류가 날 때 있음
+            self.crypto_bought = self.balance * action / current_price # 현금 * action으로 정해진 비율만큼 이용해서 구매
             self.balance -= self.crypto_bought * current_price
             self.crypto_held += self.crypto_bought
             self.trades.append({'Date' : date, 'High' : high, 'Low' : low, 'Total': self.crypto_bought, 'Type': "buy"})
-
-        elif action == 2 and self.crypto_held>0:
-            # Sell 100% of current crypto held
-            self.crypto_sold = self.crypto_held
-            self.balance += self.crypto_sold * current_price
+        
+        elif action < 0 and self.crypto_held * abs(action) > 0: 
+            self.crypto_sold = self.crypto_held * abs(action) 
+            self.balance += self.crypto_sold * abs(action) * current_price
             self.crypto_held -= self.crypto_sold
             self.trades.append({'Date' : date, 'High' : high, 'Low' : low, 'Total': self.crypto_sold, 'Type': "sell"})
 
@@ -134,18 +147,17 @@ class TradingEnv(gym.Env):
         self.net_worth = self.balance + self.crypto_held * current_price
 
         self.orders_history.append([self.balance, self.net_worth, self.crypto_bought, self.crypto_sold, self.crypto_held])
-        #Write_to_file(Date, self.orders_history[-1])
 
         # Calculate reward
-        reward = (self.net_worth - self.prev_net_worth)
+        reward = self.net_worth - self.prev_net_worth
 
         if self.net_worth <= self.initial_balance/2:
-            #reward = -10000
             done = True
         else:
             done = False
 
         obs = self._next_observation()
+        #obs = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         
         return obs, reward, done
 
@@ -165,33 +177,47 @@ class TradingEnv(gym.Env):
     
     def act(self, state, testmode): # select_action에 대응
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-        sample = random.random()
-        # 초반에는 엡실론 값을 높게 하여 최대한 다양한 경험을 해보도록 하고, 점점 그 값을 낮춰가며 신경망이 결정하는 비율을 높인다
-        eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1 * self.current_step / self.eps_decay) 
+        with torch.no_grad():
+            action = self.Actor_behaviour(state) 
+
+        action = action.cpu()
+        #action = action.item()
+        action_with_noise = action + np.random.rand(1) * 0.1            
+
+        if action_with_noise > 1:
+            action_with_noise = 1
+        elif action_with_noise < -1:
+            action_with_noise = -1
         
         if testmode == False:
-            if sample > eps_threshold:
-                with torch.no_grad():
-                    return self.Behaviour(state).max(1).indices.view(1,1)
-            else:
-                return torch.tensor([[np.random.choice(self.action_space)]], device=device, dtype=torch.long)
+            #return torch.tensor([[action_with_noise]], device=device, dtype=torch.long)
+            return action_with_noise
         else:
-            return self.Target(state).max(1).indices.view(1,1)
+            #return torch.tensor([[action]], device=device, dtype=torch.long)
+            return action
 
-    def save(self, name="dqn"):
-        torch.save(self.Target.state_dict(), f'./dqn/{name}_Target.h5')
-        torch.save(self.Behaviour.state_dict(), f'./dqn/{name}_Behaviour.h5')
 
-    def load(self, name="dqn"):
-        self.Target.load_state_dict(torch.load(f'./dqn/{name}_Target.h5', weights_only=True))
-        self.Behaviour.load_state_dict(torch.load(f'./dqn/{name}_Behaviour.h5', weights_only=True))
+        #if sample > eps_threshold:
+        #    with torch.no_grad():
+        #        return self.Actor(state).max(1).indices.view(1,1)
+        #else:
+        #    return torch.tensor([[np.random.choice(self.action_space)]], device=device, dtype=torch.long)
+    
+
+    def save(self, name="ddpg"):
+        torch.save(self.Actor_target.state_dict(), f'./ddpg/{name}_Actor.h5')
+        torch.save(self.Critic_target.state_dict(), f'./ddpg/{name}_Critic.h5')
+
+    def load(self, name="ddpg"):
+        self.Actor_target.load_state_dict(torch.load(f'./ddpg/{name}_Actor.h5', weights_only=True))
+        self.Critic_target.load_state_dict(torch.load(f'./ddpg/{name}_Critic.h5', weights_only=True))
         
     def optimize_model(self):
-        if len(self.memory) < self.batch_size:
+        if len(self.memory) < self.BATCH_SIZE:
             return
         Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward'))
-        transitions = self.memory.sample(self.batch_size)
+        transitions = self.memory.sample(self.BATCH_SIZE)
         # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
         # detailed explanation). This converts batch-array of Transitions
         # to Transition of batch-arrays.
@@ -210,37 +236,53 @@ class TradingEnv(gym.Env):
         # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
         # columns of actions taken. These are the actions which would've been taken
         # for each batch state according to policy_net
-        state_action_values = self.Behaviour(state_batch).gather(1, action_batch)
+        #state_action_values = self.Actor(state_batch).gather(1, action_batch)
+        #state_action_values = self.Actor(state_batch).gather(1, action_batch) 
+        state_action_values = self.Critic_behaviour(state_batch, action_batch).gather(1, action_batch) 
 
         # Compute V(s_{t+1}) for all next states.
         # Expected values of actions for non_final_next_states are computed based
         # on the "older" target_net; selecting their best reward with max(1).values
         # This is merged based on the mask, such that we'll have either the expected
         # state value or 0 in case the state was final.
-        next_state_values = torch.zeros(self.batch_size, device=device)
+        next_state_values = torch.zeros(self.BATCH_SIZE, device=device)
         with torch.no_grad():
-            next_state_values[non_final_mask] = self.Target(non_final_next_states).max(1).values
+            #next_state_values[non_final_mask] = self.Actor(non_final_next_states, state_action_values).max(1).values
+            next_state_values[non_final_mask] = self.Critic_target(non_final_next_states, self.Actor_target(non_final_next_states))#.max(1).values
         # Compute the expected Q values
-        expected_state_action_values = (next_state_values * self.gamma) + reward_batch
+        expected_state_action_values = (next_state_values * self.GAMMA) + reward_batch
+
 
         # Compute Huber loss
-        criterion = nn.MSELoss()
-        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+        critic_criterion = nn.MSELoss()
+        critic_loss = critic_criterion(state_action_values, expected_state_action_values.unsqueeze(1))
 
         # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        # In-place gradient clipping
-        #torch.nn.utils.clip_grad_value_(self.Policy.parameters(), 100)
-        self.optimizer.step()
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
 
-        self.soft_update_target(self.Target, self.Behaviour)
-    
-    def soft_update_target(self, target, behaviour):
-        for target_parameter, behaviour_parameter in zip(target.parameters(), behaviour.parameters()):
-            target_parameter.data.copy_((1 - self.tau) * target_parameter.data + self.tau * behaviour_parameter)
+        # In-place gradient clipping
+        #torch.nn.utils.clip_grad_value_(self.Actor.parameters(), 100)
+        self.critic_optimizer.step()
+
+        
+        actor_loss = -torch.mean(self.Critic_behaviour(state_batch, self.Actor_behaviour(state_batch)))
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        self.soft_update_target(self.Critic_target, self.Critic_behaviour)
+        self.soft_update_target(self.Actor_target, self.Actor_behaviour)
+
+    def soft_update_target(self, target, original):
+        for target_parameters, original_parameters in zip(target.parameters(), original.parameters()):
+            target_parameters.data.copy_((1 - self.TAU) * target_parameters.data + self.TAU * original_parameters.data)
+        
 
 def train_agent(env, visualize=False, train_episodes=1, training_batch_size=500):
+    #env.create_writer() # create TensorBoard writer
+    #total_average = deque(maxlen=100) # save recent 100 episodes net worth
+    #best_average = 0 # used to track best average net worth
     memory = ReplayMemory(1000)
     
     for episode in range(train_episodes):
@@ -251,18 +293,20 @@ def train_agent(env, visualize=False, train_episodes=1, training_batch_size=500)
             env.render(visualize)
             action = env.act(state, testmode=False)
             next_state, reward, done = env.step(action)
-            if done:
-                break
-            action_onehot = np.zeros(3)
-            action_onehot[action] = 1
+            #action_onehot = np.zeros(3)
+            #action_onehot[action] = 1
             memory.push(state, action, next_state, reward) # Store the transition in memory
+            #next_state = torch.tensor(next_state, dtype=torch.float32, device=device).unsqueeze(0)
             state = next_state
             env.optimize_model() # perform one step of the optimization on the policy network
 
-        print(f"Episode: {episode} Net worth: {env.net_worth}")
-        if episode == train_episodes - 1:
-            env.save()
+            print(f"net_worth: {env.net_worth}, step: {env.current_step}")
+            if episode == train_episodes - 1:
+                env.save()
 
+            if done:
+                break
+    
 def test_agent(env, visualize=True, test_episodes=1):
     env.load() # load the model
     for episode in range(test_episodes):
@@ -271,7 +315,7 @@ def test_agent(env, visualize=True, test_episodes=1):
             env.render(visualize)
             action = env.act(state, testmode=True)
             state, reward, done = env.step(action)
-            print(f"Episode {episode} net_worth:, {env.net_worth}")
+            print(f"Episode {episode} net_worth: {env.net_worth}")
             if env.current_step == env.end_step:
                 break
 

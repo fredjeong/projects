@@ -28,3 +28,5 @@ The environment is designed using OpenAI Gym.
 \[읽을거리\]
 
 https://greentec.github.io/reinforcement-learning-fourth/
+
+tensorboard는 어떻게 할지.. 거래 기록을 로그로 남겨놔야 하는데.. 

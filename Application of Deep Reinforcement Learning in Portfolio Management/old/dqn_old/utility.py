@@ -1,45 +1,9 @@
 import pandas as pd
-from collections import deque
+from collections import deque, namedtuple
 import matplotlib.pyplot as plt
 from mplfinance.original_flavor import candlestick_ohlc
 import matplotlib.dates as mpl_dates
-from datetime import datetime
-import os
-import cv2
-import numpy as np
-import torch
-
-#def write_to_file(date, net_worth, filename='{}.txt'.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))):
-#    for i in net_worth: 
-#        date += " {}".format(i)
-#    #print(Date)
-#    if not os.path.exists('logs'):
-#        os.makedirs('logs')
-#    file = open("logs/"+filename, 'a+')
-#    file.write(date+"\n")
-#    file.close()
-
-class RolloutBuffer:
-    def __init__(self):
-        self.buffer = list()
-
-    def store(self, transition):
-        self.buffer.append(transition)
-
-    def sample(self):
-        s, a, r, s_prime, done = map(np.array, zip(*self.buffer))
-        self.buffer.clear()
-        return (
-            torch.FloatTensor(s),
-            torch.FloatTensor(a),
-            torch.FloatTensor(r).unsqueeze(1),
-            torch.FloatTensor(s_prime),
-            torch.FloatTensor(done).unsqueeze(1)
-        )
-
-    @property
-    def size(self):
-        return len(self.buffer)
+import random
 
 class TradingGraph:
     # A crypto trading visualization using matplotlib made to render custom prices which come in following way:
@@ -125,4 +89,20 @@ class TradingGraph:
         plt.show(block=False)
         # Necessary to view frames before they are unrendered
         plt.pause(0.001)
-        
+
+class ReplayMemory(object):
+    
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+        self.Transition = namedtuple('Transition',
+                                ('state', 'action', 'next_state', 'reward'))
+
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(self.Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)

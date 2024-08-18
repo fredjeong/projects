@@ -1,75 +1,50 @@
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Flatten
-from tensorflow.keras import backend as K
-#tf.config.experimental_run_functions_eagerly(True) # used for debuging and development
-#tf.compat.v1.disable_eager_execution() # usually using this for fastest performance
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-# https://pylessons.com/LunarLander-v2-PPO/
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else
+    "mps" if torch.backends.mps.is_available() else
+    "cpu"
+)
 
-class Actor_Model:
-    def __init__(self, input_shape, action_space, lr, optimizer):
-        X_input = Input(input_shape)
-        self.action_space = action_space
+class Actor(nn.Module): # action return
+    def __init__(self):
+        super(Actor, self).__init__()
+        self.flatten = nn.Flatten()
+        self.layer1 = nn.Linear(500, 512) # state_dim = 500
+        self.layer2 = nn.Linear(512, 256)
+        self.layer3 = nn.Linear(256, 64)
+        self.mu_layer = nn.Linear(64, 1) # action_dim = 1
+        self.log_std_layer = nn.Linear(64, 1) # action_dim = 1
 
-        X = Flatten(input_shape=input_shape)(X_input)
-        X = Dense(512, activation="relu")(X)
-        X = Dense(256, activation="relu")(X)
-        X = Dense(64, activation="relu")(X)
-        output = Dense(self.action_space, activation="softmax")(X)
+    def forward(self, x):
+        x = self.flatten(x)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
 
-        self.actor = Model(inputs = X_input, outputs = output)
-        self.actor.compile(loss=self.ppo_loss, optimizer=optimizer(learning_rate=lr))
+        mu = self.mu_layer(x)
+        log_std = torch.tanh(self.log_std_layer(x)) # -1에서 1 사이로 표준편차의 로그값 반환
 
-    def ppo_loss(self, y_true, y_pred):
-        # Defined in https://arxiv.org/abs/1707.06347
-        advantages, prediction_picks, actions = y_true[:, :1], y_true[:, 1:1+self.action_space], y_true[:, 1+self.action_space:]
-        LOSS_CLIPPING = 0.2
-        ENTROPY_LOSS = 0.001
-        
-        prob = actions * y_pred
-        old_prob = actions * prediction_picks
+        return mu, log_std.exp()
 
-        prob = K.clip(prob, 1e-10, 1.0)
-        old_prob = K.clip(old_prob, 1e-10, 1.0)
+class Critic(nn.Module): # value return
+    def __init__(self):
+        super(Critic, self).__init__()
+        self.flatten = nn.Flatten()
+        self.layer1 = nn.Linear(500, 512)
+        self.layer2 = nn.Linear(512, 256)
+        self.layer3 = nn.Linear(256, 64)
+        self.layer4 = nn.Linear(64, 1)
+    
+    def forward(self, x):
+        x = self.flatten(x)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        x = self.layer4(x)
 
-        ratio = K.exp(K.log(prob) - K.log(old_prob))
-        
-        p1 = ratio * advantages
-        p2 = K.clip(ratio, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantages
-
-        actor_loss = -K.mean(K.minimum(p1, p2))
-
-        entropy = -(y_pred * K.log(y_pred + 1e-10))
-        entropy = ENTROPY_LOSS * K.mean(entropy)
-        
-        total_loss = actor_loss - entropy
-
-        return total_loss
-
-    def predict(self, state):
-        return self.actor.predict(state)
-
-class Critic_Model:
-    def __init__(self, input_shape, action_space, lr, optimizer):
-        X_input = Input(input_shape)
-
-        V = Flatten(input_shape=input_shape)(X_input)
-        V = Dense(512, activation="relu")(V)
-        V = Dense(256, activation="relu")(V)
-        V = Dense(64, activation="relu")(V)
-        value = Dense(1, activation=None)(V)
-
-        self.critic = Model(inputs=X_input, outputs = value)
-        self.critic.compile(loss=self.critic_PPO2_loss, optimizer=optimizer(learning_rate=lr))
-
-    def critic_PPO2_loss(self, y_true, y_pred):
-        value_loss = K.mean((y_true - y_pred) ** 2) # standard PPO loss
-        return value_loss
-
-    def predict(self, state):
-        #return self.critic.predict([state, np.zeros((state.shape[0], 1))])
-        return self.critic.predict(state)
-
+        return x
