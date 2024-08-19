@@ -293,6 +293,8 @@ def train_agent(env, visualize=False, train_episodes=1, training_batch_size=500)
             env.render(visualize)
             action = env.act(state, testmode=False)
             next_state, reward, done = env.step(action)
+            if done:
+                break
             #action_onehot = np.zeros(3)
             #action_onehot[action] = 1
             memory.push(state, action, next_state, reward) # Store the transition in memory
@@ -301,11 +303,8 @@ def train_agent(env, visualize=False, train_episodes=1, training_batch_size=500)
             env.optimize_model() # perform one step of the optimization on the policy network
 
             print(f"net_worth: {env.net_worth}, step: {env.current_step}")
-            if episode == train_episodes - 1:
-                env.save()
-
-            if done:
-                break
+        if episode == train_episodes - 1:
+            env.save()
     
 def test_agent(env, visualize=True, test_episodes=1):
     env.load() # load the model
