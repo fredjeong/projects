@@ -1,6 +1,6 @@
 import pandas as pd
 
-from environment import TradingEnv, train_agent, test_agent
+from environment import TradingEnv, test_agent
 
 lookback_window_size = 50
 data_path = "./data/binance-BTCUSDT-1h.pkl"
@@ -12,4 +12,3 @@ test_df = df[train_size:]
 test_env = TradingEnv(test_df, lookback_window_size=lookback_window_size)
 
 test_agent(test_env, visualize=False, test_episodes=1)
-#Random_games(test_env, visualize=False, train_episodes = 1000)

@@ -16,7 +16,7 @@ import gymnasium as gym
 
 
 from model import Actor, Critic
-from utils import TradingGraph, RolloutBuffer
+from utils_a2c import TradingGraph, RolloutBuffer
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else
@@ -314,11 +314,11 @@ class TradingEnv:
 #        return result
         
 
-    def save(self, name="ppo"):
+    def save(self, name="a2c"):
         torch.save(self.Actor.state_dict(), f'./a2c/{name}_Actor.h5')
         torch.save(self.Critic.state_dict(), f'./a2c/{name}_Critic.h5')
 
-    def load(self, name="ppo"):
+    def load(self, name="a2c"):
         self.Actor.load_state_dict(torch.load(f'./a2c/{name}_Actor.h5', weights_only=True))
         self.Critic.load_state_dict(torch.load(f'./a2c/{name}_Critic.h5', weights_only=True))
 

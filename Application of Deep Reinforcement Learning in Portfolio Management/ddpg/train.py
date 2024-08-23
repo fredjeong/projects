@@ -18,4 +18,4 @@ train_df = df[:train_size]
 
 train_env = TradingEnv(train_df, lookback_window_size=lookback_window_size)
 
-train_agent(train_env, train_episodes=20, training_batch_size=500)
+train_agent(train_env, train_episodes=20, training_batch_size=3000)

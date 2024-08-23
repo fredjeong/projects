@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 from mplfinance.original_flavor import candlestick_ohlc
 import matplotlib.dates as mpl_dates
 import random
+import torch
+import torch.nn as nn
 
 class TradingGraph:
     # A crypto trading visualization using matplotlib made to render custom prices which come in following way:
@@ -107,6 +109,14 @@ class ReplayMemory(object):
 
     def __len__(self):
         return len(self.memory)
+
+# Weight initialisation
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_normal_(m.weight)
+        #if m.bias:
+        #    nn.init.zeros_(m.bias)
+            #m.bias.data.fill_(0.01)
 
 #def OU_noise(action, mu=0, theta=0.15, sigma=0.3):
 #    dx = -theta

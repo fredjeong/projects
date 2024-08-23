@@ -28,4 +28,4 @@ class DQN(nn.Module):
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         x = F.relu(self.layer3(x))
-        return F.sigmoid(self.layer4(x))
+        return self.layer4(x)
