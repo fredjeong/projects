@@ -1,5 +1,6 @@
 import pandas as pd
-from collections import deque
+from collections import deque, namedtuple
+import random
 import matplotlib.pyplot as plt
 from mplfinance.original_flavor import candlestick_ohlc
 import matplotlib.dates as mpl_dates
@@ -126,3 +127,33 @@ class TradingGraph:
         # Necessary to view frames before they are unrendered
         plt.pause(0.001)
         
+class ReplayMemory(object):
+    
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+        self.Transition = namedtuple('Transition',
+                                ('state', 'action', 'next_state', 'reward'))
+
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(self.Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
+    
+    def upload(self):
+        return list(self.memory)
+        #s, a, r, s_prime, done = map(np.array, zip(*self.buffer))
+    
+    def clear(self):
+        self.memory.clear()
+        #return (
+        #    torch.FloatTensor(s),
+        #    torch.FloatTensor(a),
+        #    torch.FloatTensor(r).unsqueeze(1),
+        #    torch.FloatTensor(s_prime),
+        #    torch.FloatTensor(done).unsqueeze(1)
+        #)

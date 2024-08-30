@@ -34,12 +34,16 @@ class TradingEnv:
 
         self.buffer = RolloutBuffer()
 
+        self.actor_losses = []
+        self.critic_losses = []
+        self.portfolio_values = []
+        self.benchmark = []
+
         # Neural networks part bellow
         self.lr = 0.0001
         self.epochs = 1
-        self.normalise_value = 100000       
+      
         self.batch_size = 64 
-        self.gamma = 0.99
         self.n_epochs = 10
         self.lmbda = 0.5
         self.clip_ratio = 0.2
@@ -58,6 +62,9 @@ class TradingEnv:
         self.critic_optimizer = optim.Adam(self.Critic.parameters(), lr=self.lr)
 
     def reset(self, env_steps_size = 0):
+        self.portfolio_values = []
+        self.benchmark = []
+
         self.balance = self.initial_balance
         self.net_worth = self.initial_balance
         self.prev_net_worth = self.initial_balance
@@ -185,85 +192,82 @@ class TradingEnv:
             volume = self.df.loc[self.current_step, 'volume']
 
             self.visualisation.render(date, open, high, low, close, volume, self.net_worth, self.trades)
-
-#    def get_gaes(self, rewards, dones, values, next_values, gamma = 0.99, lamda = 0.95, normalize=False):
-#        deltas = [r + gamma * (1 - d) * nv - v for r, d, nv, v in zip(rewards, dones, next_values, values)]
-#        deltas = np.stack(deltas)
-#        gaes = copy.deepcopy(deltas)
-#        for t in reversed(range(len(deltas) - 1)):
-#            gaes[t] = gaes[t] + (1 - dones[t]) * gamma * lamda * gaes[t + 1]
-#
-#        target = gaes + values
-#        #if normalize:
-#        #    gaes = (gaes - gaes.mean()) / (gaes.std() + 1e-8)
-#        return np.vstack(gaes), np.vstack(target)
-
-#    def replay(self, states, actions, rewards, predictions, dones, next_states):
-#        # reshape memory to appropriate shape for training
-#        states = np.vstack(states)
-#        next_states = np.vstack(next_states)
-#        actions = np.vstack(actions)
-#        predictions = np.vstack(predictions)
-#
-#        # Compute discounted rewards
-#        #discounted_r = np.vstack(self.discount_rewards(rewards))
-#
-#        # Get Critic network predictions 
-#        values = self.critic.predict(states)
-#        next_values = self.critic.predict(next_states)
-#        
-#        # Compute advantages
-#        #advantages = discounted_r - values
-#        advantages, target = self.get_gaes(rewards, dones, np.squeeze(values), np.squeeze(next_values))
-#
-#        # stack everything to numpy array
-#        y_true = np.hstack([advantages, actions])
-#        
-#        # training Actor and Critic networks
-#        a_loss = self.actor.actor.fit(states, y_true, epochs=self.epochs, verbose=0, shuffle=True)
-#        c_loss = self.critic.critic.fit(states, target, epochs=self.epochs, verbose=0, shuffle=True)
     
 
-    def optimize_model(self, states, actions, rewards, dones, next_states, log_probs):
-        # 현재 T 내의 모든 state, action, reward, done, next_state 확보했음
-        # training_batch_size = len(states)
-        returns = [0 for _ in range(len(states))]
-        returns[0] = rewards[0]
-        for i in range(1, len(states)):
-            returns[i] += rewards[i] + returns[i-1]
+#    def optimize_model(self, states, actions, rewards, dones, next_states, log_probs):
+#        # 현재 T 내의 모든 state, action, reward, done, next_state 확보했음
+#        # training_batch_size = len(states)
+#        returns = [0 for _ in range(len(states))]
+#        returns[0] = rewards[0]
+#        for i in range(1, len(states)):
+#            returns[i] += rewards[i] + returns[i-1]
+#
+#        deltas = [0 for _ in range(len(states)-1)]
+#        advantages = [0 for _ in range(len(states)-1)]
+#        self.Actor.train() # training 모드로 변경
+#        self.Critic.train() # training 모드로 변경
+#
+#        states = torch.from_numpy(np.array(states)).to(torch.float32).to(device)
+#        next_states = torch.from_numpy(np.array(next_states)).to(torch.float32).to(device)
+#        actions = torch.from_numpy(np.array(actions)).to(torch.float32).to(device)
+#        log_probs = torch.from_numpy(np.array(log_probs[:-1])).to(torch.float32).to(device)
+#        returns = torch.tensor(returns, dtype=torch.float32).to(device)
+#
+#        advantages[-1] = rewards[-1]
+#
+#        # 1-step TD error
+#        for t in reversed(range(len(deltas)-1)):
+#            advantages[t] = rewards[t] + self.Critic(next_states[t]) - self.Critic(states[t])
+#        
+#        #gaes.append(0)
+#        
+#        
+#
+#        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
+#
+#
+#        actor_loss = torch.mul(advantages, log_probs).mean().requires_grad_()
+#        self.actor_losses.append(actor_loss.item())
+#        self.actor_optimizer.zero_grad()
+#        actor_loss.backward()
+#        self.actor_optimizer.step()
+#
+#        critic_loss = torch.mul(advantages, advantages).mean().requires_grad_()
+#        self.critic_losses.append(critic_loss.item())
+#        self.critic_optimizer.zero_grad()
+#        critic_loss.backward()
+#        self.critic_optimizer.step()
+            
+    def optimize_model(self, state, action, reward, done, next_state, log_prob):
 
-        deltas = [0 for _ in range(len(states)-1)]
-        advantages = [0 for _ in range(len(states)-1)]
-        self.Actor.train() # training 모드로 변경
-        self.Critic.train() # training 모드로 변경
+        delta = (reward + self.Critic(next_state) - self.Critic(state))
+        actor_loss = torch.mul(log_prob, delta)
+        self.actor_losses.append(actor_loss.item())
 
-        states = torch.from_numpy(np.array(states)).to(torch.float32).to(device)
-        next_states = torch.from_numpy(np.array(next_states)).to(torch.float32).to(device)
-        actions = torch.from_numpy(np.array(actions)).to(torch.float32).to(device)
-        log_probs = torch.from_numpy(np.array(log_probs[:-1])).to(torch.float32).to(device)
-        returns = torch.tensor(returns, dtype=torch.float32).to(device)
 
-        advantages[-1] = rewards[-1]
+        critic_loss = F.mse_loss(reward + self.Critic(next_state), self.Critic(state))
+        self.critic_losses.append(critic_loss.item())
 
-        # 1-step TD error
-        for t in reversed(range(len(deltas)-1)):
-            advantages[t] = rewards[t] + self.gamma * self.Critic(next_states[t]) - self.Critic(states[t])
-        
-        #gaes.append(0)
-        
-        
-
-        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
-
-        actor_loss = torch.mul(advantages, log_probs).mean().requires_grad_()
+        #actor_loss.unsqueeze(0)
+        #critic_loss.unsqueeze(0)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
-
-        critic_loss = torch.mul(advantages, advantages).mean().requires_grad_()
+        
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
+
+        #actor_loss = torch.tensor(actor_loss, dtype=torch.float32, device=device).requires_grad_()
+        #critic_loss = torch.tensor(critic_loss, dtype=torch.float32, device=device).requires_grad_()
+
+
+
+
+        #actor_loss = torch.mul(log_prob * delta, dtype=torch.float32, device=device).requires_grad_()
+        #critic_loss = torch.tensor(delta**2, dtype=torch.float32, device=device).requires_grad_()
+
+
 
 
 
@@ -328,8 +332,9 @@ def train_agent(env, visualize=False, train_episodes=20, training_batch_size=500
 
     for episode in range(train_episodes):
         state = env.reset(env_steps_size = training_batch_size)
+        #state = env.reset()
         #state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-        
+        buy_and_hold = round((env.df.loc[env.end_step, 'close'] / env.df.loc[env.start_step, 'open']) * 100, 2)
         # Create episode minibatch
         states, actions, rewards, dones, next_states, log_probs = [], [], [], [], [], []
         for _ in range(training_batch_size):
@@ -342,27 +347,34 @@ def train_agent(env, visualize=False, train_episodes=20, training_batch_size=500
             next_state, reward, done = env.step(action)
             if done:
                 break
-            
+            next_state = torch.tensor(next_state, dtype=torch.float32, device=device).unsqueeze(0)
+            reward = torch.tensor(reward, dtype=torch.float32, device=device).unsqueeze(0)
+            log_prob = torch.tensor(log_prob, dtype=torch.float32, device=device).unsqueeze(0)
             #memory.push(state, action, next_state, reward)
             # Store (next_state, action, reward) in the episode minibatch
-            states.append(np.expand_dims(state, axis=0))
-            next_states.append(np.expand_dims(next_state, axis=0))
+            #states.append(np.expand_dims(state, axis=0))
+            #next_states.append(np.expand_dims(next_state, axis=0))
             #next_state = torch.tensor(next_state, dtype=torch.float32, device=device).unsqueeze(0)
-            actions.append(action)
-            rewards.append(reward)
-            dones.append(done)
-            log_probs.append(log_prob)
-            
+            #actions.append(action)
+            #rewards.append(reward)
+            #dones.append(done)
+            #log_probs.append(log_prob)
+            env.portfolio_values.append(env.net_worth)
             # Update state
             state = next_state
-        
+            env.optimize_model(state, action, reward, done, next_state, log_prob)
+            env.benchmark.append(env.df.loc[env.current_step, 'close'] * env.initial_balance / env.df.loc[env.start_step, 'close'])
         # Timestep 내의 모든 state, action, reward, done, next_state 확보했음
         # 확보한 애들을 optimise에 던져줘야 함
-        env.optimize_model(states, actions, rewards, dones, next_states, log_probs)
-        print(f"Episode {episode} net_worth: {env.net_worth}")
+        #env.optimize_model(states, actions, rewards, dones, next_states, log_probs)
+        print(f"Episode: {episode+1} net_worth: {env.net_worth}, Benchmark: {buy_and_hold}")
+        np.savetxt(f'./a2c/records/benchmark_{episode}.csv', env.benchmark)
+        np.savetxt(f'./a2c/records/portfolio_values_{episode}.csv', env.portfolio_values)
+        
         if episode == train_episodes - 1:
             env.save()
-
+    np.savetxt('./a2c/records/actor_losses.csv', env.actor_losses)
+    np.savetxt('./a2c/records/critic_losses.csv', env.critic_losses)
 
 def test_agent(env, visualize=False, test_episodes=10):
     env.load() # load the model
@@ -373,9 +385,10 @@ def test_agent(env, visualize=False, test_episodes=10):
             env.render(visualize)
             action, log_prob = env.act(state, testmode=True)
             next_state, reward, done = env.step(action)
+            env.portfolio_values.append(env.net_worth)
             print(f"Episode {episode} net_worth: {env.net_worth}")
             if env.current_step == env.end_step:
                 #average_net_worth += env.net_worth
                 break
-            
+    np.savetxt('./a2c/portfolio_values.csv', env.portfolio_values)
     #print("average {} episodes agent net_worth: {}".format(test_episodes, average_net_worth/test_episodes))

@@ -19,10 +19,16 @@ class Actor(nn.Module): # action return
         self.layer3 = nn.Linear(256, 64)
         self.mu_layer = nn.Linear(64, 1) # action_dim = 1
         self.log_std_layer = nn.Linear(64, 1) # action_dim = 1
+        
+        #self.layer1 = nn.Linear(500, 64) # state_dim = 500
+        #self.layer2 = nn.Linear(64, 64)
+        #self.layer3 = nn.Linear(64, 64)
+        #self.mu_layer = nn.Linear(64, 1) # action_dim = 1
+        #self.log_std_layer = nn.Linear(64, 1) # action_dim = 1
 
     def forward(self, x):
         x = self.flatten(x)
-        x = F.relu(self.layer1(x))
+        x = self.layer1(x)
         x = F.relu(self.layer2(x))
         x = F.relu(self.layer3(x))
 
@@ -42,7 +48,7 @@ class Critic(nn.Module): # value return
     
     def forward(self, x):
         x = self.flatten(x)
-        x = F.relu(self.layer1(x))
+        x = self.layer1(x)
         x = F.relu(self.layer2(x))
         x = F.relu(self.layer3(x))
         x = self.layer4(x)

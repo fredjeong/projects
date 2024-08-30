@@ -5,8 +5,12 @@ from environment import TradingEnv, train_agent, test_agent
 lookback_window_size = 50
 data_path = "./data/binance-BTCUSDT-1h.pkl"
 df = pd.read_pickle(data_path)
-train_size = int(len(df) * 0.7)
 
+#new_df = df[-10000:]
+#train_size = int(len(new_df) * 0.7)
+#test_df = new_df[train_size:]
+
+train_size = int(len(df) * 0.7)
 test_df = df[train_size:]
 
 test_env = TradingEnv(test_df, lookback_window_size=lookback_window_size)
